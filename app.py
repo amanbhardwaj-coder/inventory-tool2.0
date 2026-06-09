@@ -194,8 +194,19 @@ def clean_input_csv(csv_text: str, rules: Dict[str, Any]) -> Dict[str, Any]:
     for r in rows:
         rr = []
         for j, v in enumerate(r):
-            x = str(v or "").strip().replace(";", ",").replace("|", ",").replace("#", ",")
-            x = re.sub(r"\s*,\s*", ",", x)
+            col_header = new_cols[j] if j < len(new_cols) else ""
+            x = str(v or "").strip()
+
+            if is_available_col(col_header):
+                # Variant columns: normalise all separators and whitespace around commas
+                x = x.replace(";", ",").replace("|", ",").replace("#", ",")
+                x = re.sub(r"\s*,\s*", ",", x)
+            else:
+                # Static columns: only strip the # wildcard separator.
+                # Do NOT collapse spaces around commas — "Round, brilliant cut"
+                # is a prose value and must survive intact.
+                x = x.replace("#", ",")
+
             if j < len(col_setter_base) and col_setter_base[j]:
                 base_key = col_setter_base[j]
                 x = rules.get("value_maps", {}).get(base_key, {}).get(x.lower(), x)
@@ -413,10 +424,11 @@ def refine_input_csv(csv_text: str) -> Tuple[str, RefineReport]:
                 tokens = _dedup_tokens(tokens, col_name, report)
                 val    = ",".join(tokens)
             else:
-                # For non-variant cols only fix the # separator (cleaning step
-                # handles ; | later), and do NOT split/dedup.
+                # Static columns: leave value completely untouched.
+                # The # wildcard is the one exception — replace with comma
+                # so product codes like "ABC#123" become "ABC,123" consistently,
+                # but do NOT touch spacing around commas or any other character.
                 val = val.replace("#", ",")
-                val = re.sub(r"\s*,\s*", ",", val)
 
             new_row.append(val)
 
@@ -951,7 +963,12 @@ def expand_inventory(csv_text:       str,
     v_flags = []
     for i in range(len(cols)):
         col_name = cols[i]
-        if should_skip_expansion(col_name):
+        # A column can only expand if it is BOTH:
+        #   (a) an "Available …" column, AND
+        #   (b) not in the explicit skip list.
+        # Non-Available columns are ALWAYS static — a comma or # in a
+        # Jewelry Style / Notes / Description cell must never trigger expansion.
+        if should_skip_expansion(col_name) or not is_available_col(col_name):
             v_flags.append(False)
         else:
             v_flags.append(
@@ -982,16 +999,25 @@ def expand_inventory(csv_text:       str,
             col_name = cols[idx]
             if should_skip_expansion(col_name):
                 continue
-            raw_val = str(row[idx] or "")
-            tokens  = split_variant_tokens(raw_val)
+            raw_val    = str(row[idx] or "")
+            is_avail   = is_available_col(col_name)
+
+            # Only split into multiple tokens if this is an Available column.
+            # Non-Available columns are always passed through as a single value
+            # regardless of whether they contain commas or # characters.
+            if is_avail:
+                tokens = split_variant_tokens(raw_val)
+            else:
+                tokens = [raw_val.strip()] if raw_val.strip() else [""]
+
             exp_meta.append({
-                "col":          col_name,
-                "tokens":       tokens,
-                "orig":         raw_val.replace("#", ","),
-                "varies":       v_flags[idx],
-                "is_available": is_available_col(col_name),
-                "available_base": available_base_name(col_name) if is_available_col(col_name) else "",
-                "idx":          idx,
+                "col":            col_name,
+                "tokens":         tokens,
+                "orig":           raw_val.replace("#", ","),
+                "varies":         v_flags[idx],
+                "is_available":   is_avail,
+                "available_base": available_base_name(col_name) if is_avail else "",
+                "idx":            idx,
             })
 
         varying_options: List[str] = []
