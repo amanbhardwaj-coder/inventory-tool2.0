@@ -1246,7 +1246,8 @@ def _price_adj_editor(existing: Dict[str, Dict[str, float]]) -> Dict[str, Dict[s
         c1, c2, c3a, c3b, c4 = st.columns([2, 2, 0.6, 1.4, 0.4])
         row["col"]  = c1.text_input("col", value=row["col"],  key=f"padj_c_{i}", label_visibility="collapsed", placeholder="column")
         row["val"]  = c2.text_input("val", value=row["val"],  key=f"padj_v_{i}", label_visibility="collapsed", placeholder="value")
-        row["sign"] = c3a.selectbox("±", ["+", "-"], index=0 if row["sign"]=="+'' else 1, key=f"padj_s_{i}", label_visibility="collapsed")
+        sign_idx = 0 if row["sign"] == "+" else 1
+        row["sign"] = c3a.selectbox("±", ["+", "-"], index=sign_idx, key=f"padj_s_{i}", label_visibility="collapsed")
         row["amt"]  = c3b.number_input("amt", value=float(row["amt"]), min_value=0.0, step=0.01, key=f"padj_a_{i}", label_visibility="collapsed")
         if c4.button("✕", key=f"padj_del_{i}", help="remove"):
             to_delete.append(i)
@@ -1358,7 +1359,8 @@ def _render_price_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
         if sv and sv in vals:
             amt = vals[sv]
             total += amt
-            lines.append(f"{col} = "{sv}": {'+' if amt>=0 else ''}{currency} {amt:.2f}")
+            sign_str = "+" if amt >= 0 else ""
+            lines.append(f'{col} = "{sv}": {sign_str}{currency} {amt:.2f}')
     st.info("  ·  ".join(lines) + f"  →  **{currency} {total:.2f}**")
 
     return {"currency": currency, "default_base_price": default_price, "adjustments": adjustments}
