@@ -1149,6 +1149,224 @@ def _render_refine_report(report: RefineReport):
                 st.markdown(f'- Column **{e["column"]}**')
 
 
+# ==========================================================
+# 12A. RULES FORM HELPERS
+# ==========================================================
+
+def _abbr_editor(key_prefix: str, abbr_map: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+    """
+    Render an add/delete abbreviation table.
+    Returns the updated abbr_map.
+    """
+    rows_key = f"{key_prefix}_abbr_rows"
+    if rows_key not in st.session_state:
+        flat = []
+        for col, vals in (abbr_map or {}).items():
+            for val, code in vals.items():
+                flat.append({"col": col, "val": val, "code": code})
+        st.session_state[rows_key] = flat or []
+
+    rows = st.session_state[rows_key]
+    to_delete = []
+
+    for i, row in enumerate(rows):
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 0.4])
+        row["col"]  = c1.text_input("Column",     value=row["col"],  key=f"{key_prefix}_ac_{i}", label_visibility="collapsed", placeholder="column")
+        row["val"]  = c2.text_input("Full value",  value=row["val"],  key=f"{key_prefix}_av_{i}", label_visibility="collapsed", placeholder="full value")
+        row["code"] = c3.text_input("Short code",  value=row["code"], key=f"{key_prefix}_ak_{i}", label_visibility="collapsed", placeholder="short code")
+        if c4.button("✕", key=f"{key_prefix}_adel_{i}", help="remove"):
+            to_delete.append(i)
+
+    for i in reversed(to_delete):
+        rows.pop(i)
+
+    if st.button("＋ add abbreviation", key=f"{key_prefix}_add_abbr"):
+        rows.append({"col": "", "val": "", "code": ""})
+        st.rerun()
+
+    out: Dict[str, Dict[str, str]] = {}
+    for row in rows:
+        if row["col"] and row["val"] and row["code"]:
+            out.setdefault(row["col"], {})[row["val"]] = row["code"]
+    return out
+
+
+def _order_editor(key_prefix: str, default_order: List[str]) -> List[str]:
+    """
+    Render an editable ordered list of column names.
+    Returns the current list.
+    """
+    order_key = f"{key_prefix}_order"
+    if order_key not in st.session_state:
+        st.session_state[order_key] = list(default_order)
+
+    order = st.session_state[order_key]
+    to_delete = []
+
+    for i, col in enumerate(order):
+        c1, c2, c3 = st.columns([0.3, 3, 0.4])
+        c1.markdown(f"<div style='padding-top:6px;color:var(--text-color);opacity:.4'>#{i+1}</div>", unsafe_allow_html=True)
+        order[i] = c2.text_input("col", value=col, key=f"{key_prefix}_ord_{i}", label_visibility="collapsed")
+        if c3.button("✕", key=f"{key_prefix}_odell_{i}", help="remove"):
+            to_delete.append(i)
+
+    for i in reversed(to_delete):
+        order.pop(i)
+
+    if st.button("＋ add column", key=f"{key_prefix}_add_ord"):
+        order.append("")
+        st.rerun()
+
+    return [c for c in order if c.strip()]
+
+
+def _price_adj_editor(existing: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+    """
+    Render a price-adjustment table (column / value / ±amount).
+    Returns the updated adjustments dict.
+    """
+    rows_key = "price_adj_rows"
+    if rows_key not in st.session_state:
+        flat = []
+        for col, vals in (existing or {}).items():
+            for val, amt in vals.items():
+                sign = "+" if amt >= 0 else "-"
+                flat.append({"col": col, "val": val, "sign": sign, "amt": abs(float(amt))})
+        st.session_state[rows_key] = flat or []
+
+    rows = st.session_state[rows_key]
+    to_delete = []
+
+    hc1, hc2, hc3, _ = st.columns([2, 2, 2, 0.4])
+    hc1.markdown("<small style='color:gray'>Column</small>", unsafe_allow_html=True)
+    hc2.markdown("<small style='color:gray'>Value</small>",  unsafe_allow_html=True)
+    hc3.markdown("<small style='color:gray'>Adjustment</small>", unsafe_allow_html=True)
+
+    for i, row in enumerate(rows):
+        c1, c2, c3a, c3b, c4 = st.columns([2, 2, 0.6, 1.4, 0.4])
+        row["col"]  = c1.text_input("col", value=row["col"],  key=f"padj_c_{i}", label_visibility="collapsed", placeholder="column")
+        row["val"]  = c2.text_input("val", value=row["val"],  key=f"padj_v_{i}", label_visibility="collapsed", placeholder="value")
+        row["sign"] = c3a.selectbox("±", ["+", "-"], index=0 if row["sign"]=="+'' else 1, key=f"padj_s_{i}", label_visibility="collapsed")
+        row["amt"]  = c3b.number_input("amt", value=float(row["amt"]), min_value=0.0, step=0.01, key=f"padj_a_{i}", label_visibility="collapsed")
+        if c4.button("✕", key=f"padj_del_{i}", help="remove"):
+            to_delete.append(i)
+
+    for i in reversed(to_delete):
+        rows.pop(i)
+
+    if st.button("＋ add adjustment", key="padj_add"):
+        rows.append({"col": "", "val": "", "sign": "+", "amt": 0.0})
+        st.rerun()
+
+    out: Dict[str, Dict[str, float]] = {}
+    for row in rows:
+        if row["col"] and row["val"]:
+            amt = float(row["amt"]) if row["sign"] == "+" else -float(row["amt"])
+            out.setdefault(row["col"], {})[row["val"]] = amt
+    return out
+
+
+def _render_sku_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
+    sr = rules.get("sku_rules", {}) or {}
+    st.markdown("##### SKU shortening")
+    c1, c2 = st.columns(2)
+    joiner  = c1.text_input("Joiner character", value=sr.get("joiner", "-"), max_chars=5)
+    maxlen  = c2.number_input("Max token length (fallback)", value=int(sr.get("fallback_max_len", 8)), min_value=1, max_value=30)
+
+    st.markdown("**Column order** in SKU")
+    order = _order_editor("sku", sr.get("order") or ["Metal", "Thickness", "Carat weight"])
+
+    st.markdown("**Abbreviations** — map full values to short codes")
+    st.caption("Column · Full value · Short code")
+    abbr = _abbr_editor("sku", sr.get("abbr", {}))
+
+    # Live preview
+    sample_parts = {"Metal": "14K White Gold", "Thickness": "4.5", "Carat weight": "1"}
+    tokens = ["SR001"]
+    for col in order:
+        v = sample_parts.get(col, "")
+        if not v: continue
+        code = (abbr.get(col) or {}).get(v)
+        tokens.append(code if code else re.sub(r"[^A-Za-z0-9]", "", v).upper()[:maxlen])
+    preview = joiner.join(dict.fromkeys(t for t in tokens if t))
+    st.info(f"Preview — SR001 · 14K White Gold · 4.5mm · 1ct:  **{preview}**")
+
+    return {"enabled": True, "joiner": joiner, "fallback_max_len": maxlen, "order": order, "abbr": abbr}
+
+
+def _render_image_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
+    ir = rules.get("image_rules", {}) or {}
+    st.markdown("##### Image URL generation")
+    enabled = st.toggle("Enable image URL generation", value=bool(ir.get("enabled", False)))
+
+    c1, c2 = st.columns([3, 1])
+    base_url = c1.text_input("Base URL", value=ir.get("base_url", ""), placeholder="https://cdn.example.com/images/")
+    ext      = c2.text_input("Extension", value=ir.get("suffix", ".jpg"), max_chars=10)
+
+    c3, c4 = st.columns([1, 3])
+    joiner    = c3.text_input("Joiner", value=ir.get("joiner", "_"), max_chars=5)
+    img_count = c4.number_input("Number of image columns", value=len(ir.get("variants") or []) or 4, min_value=1, max_value=10)
+
+    st.markdown("**Filename parts** — columns included in filename (in order)")
+    order = _order_editor("img", ir.get("order") or ["Master stock", "Metal"])
+
+    st.markdown("**Abbreviations** — shorten values in the filename")
+    st.caption("Column · Full value · Short code")
+    abbr = _abbr_editor("img", ir.get("abbr", {}))
+
+    # Live preview
+    col_map = {"Master stock": "SR001", "Metal": "14K White Gold"}
+    tokens = []
+    for col in order:
+        v = col_map.get(col, "")
+        if not v: continue
+        code = (abbr.get(col) or {}).get(v)
+        tokens.append(code if code else re.sub(r"[^A-Za-z0-9]","",v).upper())
+    fn_base = joiner.join(t for t in tokens if t)
+    if base_url and fn_base:
+        st.info(f"Preview — Image URL 1:  **{base_url}{fn_base}_1{ext}**")
+    elif not base_url:
+        st.warning("Set a base URL to see the preview.")
+
+    variants = [{"column": f"Image URL {i+1}", "path_suffix": f"_{i+1}"} for i in range(int(img_count))]
+    return {
+        "enabled": enabled, "base_url": base_url, "suffix": ext,
+        "joiner": joiner, "order": order, "abbr": abbr,
+        "variants": variants, "variant_suffix_position": "before_ext",
+        "fallback": {"upper": True, "strip_non_alnum": True, "use_raw_if_missing_abbr": True},
+    }
+
+
+def _render_price_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
+    pr = rules.get("price_rules", {}) or {}
+    st.markdown("##### Pricing adjustments")
+    c1, c2 = st.columns(2)
+    default_price = c1.number_input("Default base price", value=float(pr.get("default_base_price", 0)), min_value=0.0, step=0.01)
+    currency      = c2.selectbox("Currency", ["USD", "EUR", "GBP", "INR", "AED"],
+                                  index=["USD","EUR","GBP","INR","AED"].index(pr.get("currency","USD"))
+                                  if pr.get("currency","USD") in ["USD","EUR","GBP","INR","AED"] else 0)
+
+    st.markdown("**Adjustments** — add or subtract per variant value")
+    adjustments = _price_adj_editor(pr.get("adjustments", {}))
+
+    # Live preview
+    sample = {"Metal": "14K White Gold"}
+    total = default_price
+    lines = [f"Base: {currency} {default_price:.2f}"]
+    for col, vals in adjustments.items():
+        sv = sample.get(col)
+        if sv and sv in vals:
+            amt = vals[sv]
+            total += amt
+            lines.append(f"{col} = "{sv}": {'+' if amt>=0 else ''}{currency} {amt:.2f}")
+    st.info("  ·  ".join(lines) + f"  →  **{currency} {total:.2f}**")
+
+    return {"currency": currency, "default_base_price": default_price, "adjustments": adjustments}
+
+
+# ==========================================================
+# 12. STREAMLIT FRONTEND
+# ==========================================================
 def run_streamlit_app():
     if not _HAS_STREAMLIT:
         raise RuntimeError("Streamlit is not installed. Run: pip install streamlit")
@@ -1159,75 +1377,88 @@ def run_streamlit_app():
     if "rules" not in st.session_state:
         st.session_state["rules"] = load_rules()
 
-    # ── Sidebar ──────────────────────────────────────────────────────────
-    st.sidebar.header("Run Options")
-    enable_sku     = st.sidebar.toggle("Enable SKU shortening",
-                                        value=bool(st.session_state["rules"]
-                                                   .get("sku_rules", {}).get("enabled", True)))
-    enable_images  = st.sidebar.toggle("Enable Image URL generation",
-                                        value=bool(st.session_state["rules"]
-                                                   .get("image_rules", {}).get("enabled", False)))
-    enable_pricing = st.sidebar.toggle("Enable Pricing adjustments", value=True)
-    enable_refiner = st.sidebar.toggle("Enable Input Refiner (recommended)", value=True)
+    # ── Sidebar: run toggles only ─────────────────────────────────────────
+    st.sidebar.header("Run options")
+    enable_sku     = st.sidebar.toggle("SKU shortening",       value=True)
+    enable_images  = st.sidebar.toggle("Image URL generation", value=bool(st.session_state["rules"].get("image_rules", {}).get("enabled", False)))
+    enable_pricing = st.sidebar.toggle("Pricing adjustments",  value=True)
+    enable_refiner = st.sidebar.toggle("Input Refiner",        value=True)
 
     st.sidebar.divider()
-    st.sidebar.header("Rules Editor (JSON)")
-
-    rules_text = st.sidebar.text_area(
-        "Edit normalization_rules.json",
-        value=json.dumps(st.session_state["rules"], indent=2),
-        height=420,
-    )
-
-    colA, colB = st.sidebar.columns(2)
-    with colA:
-        if st.button("Validate JSON"):
+    with st.sidebar.expander("Advanced — raw JSON"):
+        raw_json = st.text_area("normalization_rules.json", value=json.dumps(st.session_state["rules"], indent=2), height=300)
+        c1, c2 = st.columns(2)
+        if c1.button("Validate"):
             try:
-                _ = json.loads(rules_text)
-                st.sidebar.success("✅ JSON is valid.")
+                json.loads(raw_json)
+                st.success("Valid JSON")
             except Exception as e:
-                st.sidebar.error(f"❌ Invalid JSON: {e}")
-    with colB:
-        if st.button("Save rules.json"):
+                st.error(str(e))
+        if c2.button("Load from JSON"):
             try:
-                new_rules = json.loads(rules_text)
-                save_rules(new_rules)
-                st.session_state["rules"] = new_rules
-                st.sidebar.success("✅ Saved.")
+                st.session_state["rules"] = json.loads(raw_json)
+                st.success("Loaded")
+                st.rerun()
             except Exception as e:
-                st.sidebar.error(f"❌ Save failed: {e}")
+                st.error(str(e))
 
-    st.sidebar.download_button(
-        "Download rules.json",
-        data=rules_text.encode("utf-8"),
+    # ── Main: file upload ─────────────────────────────────────────────────
+    st.markdown("Upload a CSV with `Master stock` and any `Available …` variant columns.")
+    up = st.file_uploader("Upload CSV", type=["csv", "txt"])
+
+    # ── Main: rules configuration tabs ───────────────────────────────────
+    st.subheader("① Configure rules")
+    tab_sku, tab_img, tab_price = st.tabs(["SKU shortening", "Image URLs", "Pricing"])
+
+    with tab_sku:
+        new_sku_rules = _render_sku_editor(st.session_state["rules"])
+
+    with tab_img:
+        new_img_rules = _render_image_editor(st.session_state["rules"])
+
+    with tab_price:
+        new_price_rules = _render_price_editor(st.session_state["rules"])
+
+    # Merge edited rules back
+    merged_rules = dict(st.session_state["rules"])
+    merged_rules["sku_rules"]   = new_sku_rules
+    merged_rules["image_rules"] = new_img_rules
+    merged_rules["price_rules"] = new_price_rules
+
+    c_save, c_dl = st.columns([1, 3])
+    if c_save.button("💾 Save rules", type="primary"):
+        save_rules(merged_rules)
+        st.session_state["rules"] = merged_rules
+        st.success("Rules saved to normalization_rules.json")
+    c_dl.download_button(
+        "⬇ Download rules.json",
+        data=json.dumps(merged_rules, indent=2).encode("utf-8"),
         file_name="normalization_rules.json",
         mime="application/json",
     )
 
-    # ── Main ─────────────────────────────────────────────────────────────
-    st.markdown("Upload a CSV with `Master stock` and any `Available …` variant columns.")
-    up = st.file_uploader("Upload CSV", type=["csv", "txt"])
     if not up:
         st.stop()
 
     raw   = up.read().decode("utf-8", errors="ignore")
-    rules = st.session_state["rules"]
+    rules = merged_rules
 
-    # ── Pre-flight: show refiner output before user runs expansion ───────
-    st.subheader("① Pre-flight check")
+    # ── Pre-flight ────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("② Pre-flight check")
     if enable_refiner:
         refined_csv, preflight_report = refine_input_csv(raw)
         _render_refine_report(preflight_report)
     else:
         refined_csv = raw
-        st.info("Input Refiner is disabled — raw file will be used as-is.")
+        st.info("Input Refiner is disabled.")
 
-    # ── Header cleaning diff ─────────────────────────────────────────────
-    st.subheader("② Header mapping")
+    # ── Header mapping ────────────────────────────────────────────────────
+    st.subheader("③ Header mapping")
     c = clean_input_csv(refined_csv, rules)
     col1, col2 = st.columns(2)
     with col1:
-        st.write("**Unknown columns** (not in mapping file):")
+        st.write("**Unknown columns:**")
         st.write(c["diff"].get("unknown_columns", []) or "None")
     with col2:
         st.write("**Header renames applied:**")
@@ -1236,12 +1467,12 @@ def run_streamlit_app():
 
     st.divider()
 
-    # ── Run Expansion ─────────────────────────────────────────────────────
-    st.subheader("③ Expand variants")
+    # ── Expand ────────────────────────────────────────────────────────────
+    st.subheader("④ Expand variants")
     if st.button("▶ Run Expansion", type="primary"):
         try:
             expanded, meta = expand_inventory(
-                raw,                          # always start from raw; refiner runs internally
+                raw,
                 rules=rules,
                 enable_sku=enable_sku,
                 enable_images=enable_images,
@@ -1254,17 +1485,16 @@ def run_streamlit_app():
 
         st.success(f"Done. **{meta['rows_out']}** variant rows generated.")
 
-        # Show inline refine report from expansion run
         report: Optional[RefineReport] = meta.get("refine_report")
         if report and report.has_issues():
-            with st.expander("Refiner applied the following fixes during expansion"):
+            with st.expander("Refiner fixes applied during expansion"):
                 for line in report.summary_lines():
                     st.markdown(line)
 
         col_a, col_b, col_c = st.columns(3)
-        col_a.metric("Rows out",      meta["rows_out"])
-        col_b.metric("SKU shortened", "Yes" if meta["sku_shortened"]  else "No")
-        col_c.metric("Pricing applied","Yes" if meta["pricing_applied"] else "No")
+        col_a.metric("Rows out",        meta["rows_out"])
+        col_b.metric("SKU shortened",   "Yes" if meta["sku_shortened"]   else "No")
+        col_c.metric("Pricing applied", "Yes" if meta["pricing_applied"] else "No")
 
         st.download_button(
             label="⬇ Download Expanded CSV",
