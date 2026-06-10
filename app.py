@@ -1153,10 +1153,103 @@ def _render_refine_report(report: RefineReport):
 # 12A. RULES FORM HELPERS
 # ==========================================================
 
-def _abbr_editor(key_prefix: str, abbr_map: Dict[str, Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+def extract_file_meta(csv_text: str) -> Dict[str, Any]:
     """
-    Render an add/delete abbreviation table.
-    Returns the updated abbr_map.
+    Parse the uploaded CSV and return:
+      - avail_cols  : list of Available-prefixed column base names (e.g. "metal type")
+      - all_cols    : all column names including non-variant ones
+      - values      : dict[base_name -> sorted list of distinct values]
+    Used to populate dropdowns in the rules editors.
+    """
+    parsed = smart_parse(csv_text)
+    cols   = parsed["columns"]
+    rows   = parsed["rows"]
+
+    avail_cols: List[str] = []
+    all_cols:   List[str] = list(cols)
+    values:     Dict[str, List[str]] = {}
+
+    for ci, col in enumerate(cols):
+        if not is_available_col(col):
+            continue
+        base = available_base_name(col)
+        avail_cols.append(base)
+        seen: set = set()
+        for row in rows:
+            raw = str(row[ci] if ci < len(row) else "")
+            raw = raw.replace("#", ",")
+            for tok in raw.split(","):
+                tok = tok.strip()
+                if tok:
+                    seen.add(tok)
+        values[base] = sorted(seen)
+
+    return {"avail_cols": avail_cols, "all_cols": all_cols, "values": values}
+
+
+def _col_selectbox(label: str, key: str, current: str,
+                   avail_cols: List[str], extra: Optional[List[str]] = None) -> str:
+    """
+    Selectbox for choosing a column name.
+    Options = extra (e.g. ["Master stock"]) + avail_cols + ["— type manually —"].
+    Falls back to a text_input when "— type manually —" is selected or no options exist.
+    """
+    options = list(extra or []) + list(avail_cols)
+    if not options:
+        return st.text_input(label, value=current, key=key, label_visibility="collapsed", placeholder="column")
+
+    MANUAL = "— type manually —"
+    options_with_manual = options + [MANUAL]
+
+    # Determine current index
+    if current in options:
+        idx = options_with_manual.index(current)
+    else:
+        idx = len(options_with_manual) - 1   # select "type manually"
+
+    chosen = st.selectbox(label, options_with_manual, index=idx, key=key, label_visibility="collapsed")
+    if chosen == MANUAL:
+        manual_key = f"{key}_manual"
+        return st.text_input("Custom column name", value=current if current not in options else "",
+                             key=manual_key, label_visibility="collapsed", placeholder="type column name")
+    return chosen
+
+
+def _val_selectbox(label: str, key: str, current: str,
+                   col_name: str, values: Dict[str, List[str]]) -> str:
+    """
+    Selectbox for choosing a value within a column.
+    Options = distinct values from the uploaded file for that column.
+    Falls back to text_input when no values are available or manual entry is chosen.
+    """
+    # Match col_name against available base names (case-insensitive)
+    matched_vals: List[str] = []
+    col_norm = col_name.strip().lower()
+    for base, vals in values.items():
+        if base.strip().lower() == col_norm:
+            matched_vals = vals
+            break
+
+    if not matched_vals:
+        return st.text_input(label, value=current, key=key,
+                             label_visibility="collapsed", placeholder="value")
+
+    MANUAL = "— type manually —"
+    options = matched_vals + [MANUAL]
+    idx = options.index(current) if current in matched_vals else len(options) - 1
+
+    chosen = st.selectbox(label, options, index=idx, key=key, label_visibility="collapsed")
+    if chosen == MANUAL:
+        manual_key = f"{key}_manual"
+        return st.text_input("Custom value", value=current if current not in matched_vals else "",
+                             key=manual_key, label_visibility="collapsed", placeholder="type value")
+    return chosen
+
+
+def _abbr_editor(key_prefix: str, abbr_map: Dict[str, Dict[str, str]],
+                 avail_cols: List[str], values: Dict[str, List[str]]) -> Dict[str, Dict[str, str]]:
+    """
+    Abbreviation table with column + value dropdowns sourced from the uploaded file.
     """
     rows_key = f"{key_prefix}_abbr_rows"
     if rows_key not in st.session_state:
@@ -1169,16 +1262,29 @@ def _abbr_editor(key_prefix: str, abbr_map: Dict[str, Dict[str, str]]) -> Dict[s
     rows = st.session_state[rows_key]
     to_delete = []
 
+    if rows:
+        hc1, hc2, hc3, _ = st.columns([2, 2, 2, 0.4])
+        hc1.caption("Column")
+        hc2.caption("Full value from file")
+        hc3.caption("Short code")
+
     for i, row in enumerate(rows):
         c1, c2, c3, c4 = st.columns([2, 2, 2, 0.4])
-        row["col"]  = c1.text_input("Column",     value=row["col"],  key=f"{key_prefix}_ac_{i}", label_visibility="collapsed", placeholder="column")
-        row["val"]  = c2.text_input("Full value",  value=row["val"],  key=f"{key_prefix}_av_{i}", label_visibility="collapsed", placeholder="full value")
-        row["code"] = c3.text_input("Short code",  value=row["code"], key=f"{key_prefix}_ak_{i}", label_visibility="collapsed", placeholder="short code")
+        with c1:
+            row["col"] = _col_selectbox("Column", f"{key_prefix}_ac_{i}", row["col"], avail_cols)
+        with c2:
+            row["val"] = _val_selectbox("Value", f"{key_prefix}_av_{i}", row["val"],
+                                        row["col"], values)
+        row["code"] = c3.text_input("Short code", value=row["code"],
+                                    key=f"{key_prefix}_ak_{i}",
+                                    label_visibility="collapsed", placeholder="short code")
         if c4.button("✕", key=f"{key_prefix}_adel_{i}", help="remove"):
             to_delete.append(i)
 
     for i in reversed(to_delete):
         rows.pop(i)
+    if to_delete:
+        st.rerun()
 
     if st.button("＋ add abbreviation", key=f"{key_prefix}_add_abbr"):
         rows.append({"col": "", "val": "", "code": ""})
@@ -1191,27 +1297,33 @@ def _abbr_editor(key_prefix: str, abbr_map: Dict[str, Dict[str, str]]) -> Dict[s
     return out
 
 
-def _order_editor(key_prefix: str, default_order: List[str]) -> List[str]:
+def _order_editor(key_prefix: str, default_order: List[str],
+                  avail_cols: List[str], extra: Optional[List[str]] = None) -> List[str]:
     """
-    Render an editable ordered list of column names.
-    Returns the current list.
+    Ordered column list with selectbox per row sourced from the uploaded file.
     """
     order_key = f"{key_prefix}_order"
     if order_key not in st.session_state:
         st.session_state[order_key] = list(default_order)
 
-    order = st.session_state[order_key]
+    order     = st.session_state[order_key]
     to_delete = []
 
     for i, col in enumerate(order):
-        c1, c2, c3 = st.columns([0.3, 3, 0.4])
-        c1.markdown(f"<div style='padding-top:6px;color:var(--text-color);opacity:.4'>#{i+1}</div>", unsafe_allow_html=True)
-        order[i] = c2.text_input("col", value=col, key=f"{key_prefix}_ord_{i}", label_visibility="collapsed")
+        c1, c2, c3 = st.columns([0.4, 3, 0.4])
+        c1.markdown(
+            f"<div style='padding-top:8px;font-size:11px;color:gray'>#{i+1}</div>",
+            unsafe_allow_html=True,
+        )
+        with c2:
+            order[i] = _col_selectbox("col", f"{key_prefix}_ord_{i}", col, avail_cols, extra=extra)
         if c3.button("✕", key=f"{key_prefix}_odell_{i}", help="remove"):
             to_delete.append(i)
 
     for i in reversed(to_delete):
         order.pop(i)
+    if to_delete:
+        st.rerun()
 
     if st.button("＋ add column", key=f"{key_prefix}_add_ord"):
         order.append("")
@@ -1220,10 +1332,10 @@ def _order_editor(key_prefix: str, default_order: List[str]) -> List[str]:
     return [c for c in order if c.strip()]
 
 
-def _price_adj_editor(existing: Dict[str, Dict[str, float]]) -> Dict[str, Dict[str, float]]:
+def _price_adj_editor(existing: Dict[str, Dict[str, float]],
+                      avail_cols: List[str], values: Dict[str, List[str]]) -> Dict[str, Dict[str, float]]:
     """
-    Render a price-adjustment table (column / value / ±amount).
-    Returns the updated adjustments dict.
+    Price adjustment table with column + value dropdowns.
     """
     rows_key = "price_adj_rows"
     if rows_key not in st.session_state:
@@ -1234,26 +1346,34 @@ def _price_adj_editor(existing: Dict[str, Dict[str, float]]) -> Dict[str, Dict[s
                 flat.append({"col": col, "val": val, "sign": sign, "amt": abs(float(amt))})
         st.session_state[rows_key] = flat or []
 
-    rows = st.session_state[rows_key]
+    rows      = st.session_state[rows_key]
     to_delete = []
 
-    hc1, hc2, hc3, _ = st.columns([2, 2, 2, 0.4])
-    hc1.markdown("<small style='color:gray'>Column</small>", unsafe_allow_html=True)
-    hc2.markdown("<small style='color:gray'>Value</small>",  unsafe_allow_html=True)
-    hc3.markdown("<small style='color:gray'>Adjustment</small>", unsafe_allow_html=True)
+    if rows:
+        hc1, hc2, hc3, _ = st.columns([2, 2, 2, 0.4])
+        hc1.caption("Column")
+        hc2.caption("Value")
+        hc3.caption("±  Amount")
 
     for i, row in enumerate(rows):
         c1, c2, c3a, c3b, c4 = st.columns([2, 2, 0.6, 1.4, 0.4])
-        row["col"]  = c1.text_input("col", value=row["col"],  key=f"padj_c_{i}", label_visibility="collapsed", placeholder="column")
-        row["val"]  = c2.text_input("val", value=row["val"],  key=f"padj_v_{i}", label_visibility="collapsed", placeholder="value")
-        sign_idx = 0 if row["sign"] == "+" else 1
-        row["sign"] = c3a.selectbox("±", ["+", "-"], index=sign_idx, key=f"padj_s_{i}", label_visibility="collapsed")
-        row["amt"]  = c3b.number_input("amt", value=float(row["amt"]), min_value=0.0, step=0.01, key=f"padj_a_{i}", label_visibility="collapsed")
+        with c1:
+            row["col"] = _col_selectbox("col", f"padj_c_{i}", row["col"], avail_cols)
+        with c2:
+            row["val"] = _val_selectbox("val", f"padj_v_{i}", row["val"], row["col"], values)
+        sign_idx    = 0 if row["sign"] == "+" else 1
+        row["sign"] = c3a.selectbox("±", ["+", "-"], index=sign_idx,
+                                    key=f"padj_s_{i}", label_visibility="collapsed")
+        row["amt"]  = c3b.number_input("amt", value=float(row["amt"]),
+                                       min_value=0.0, step=0.01,
+                                       key=f"padj_a_{i}", label_visibility="collapsed")
         if c4.button("✕", key=f"padj_del_{i}", help="remove"):
             to_delete.append(i)
 
     for i in reversed(to_delete):
         rows.pop(i)
+    if to_delete:
+        st.rerun()
 
     if st.button("＋ add adjustment", key="padj_add"):
         rows.append({"col": "", "val": "", "sign": "+", "amt": 0.0})
@@ -1267,69 +1387,82 @@ def _price_adj_editor(existing: Dict[str, Dict[str, float]]) -> Dict[str, Dict[s
     return out
 
 
-def _render_sku_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
-    sr = rules.get("sku_rules", {}) or {}
-    st.markdown("##### SKU shortening")
+def _render_sku_editor(rules: Dict[str, Any],
+                       avail_cols: List[str], values: Dict[str, List[str]]) -> Dict[str, Any]:
+    sr     = rules.get("sku_rules", {}) or {}
     c1, c2 = st.columns(2)
-    joiner  = c1.text_input("Joiner character", value=sr.get("joiner", "-"), max_chars=5)
-    maxlen  = c2.number_input("Max token length (fallback)", value=int(sr.get("fallback_max_len", 8)), min_value=1, max_value=30)
+    joiner = c1.text_input("Joiner character", value=sr.get("joiner", "-"), max_chars=5)
+    maxlen = c2.number_input("Max token length (fallback)",
+                             value=int(sr.get("fallback_max_len", 8)), min_value=1, max_value=30)
 
     st.markdown("**Column order** in SKU")
-    order = _order_editor("sku", sr.get("order") or ["Metal", "Thickness", "Carat weight"])
+    order = _order_editor("sku", sr.get("order") or avail_cols[:3] or ["Metal"],
+                          avail_cols)
 
     st.markdown("**Abbreviations** — map full values to short codes")
-    st.caption("Column · Full value · Short code")
-    abbr = _abbr_editor("sku", sr.get("abbr", {}))
+    abbr = _abbr_editor("sku", sr.get("abbr", {}), avail_cols, values)
 
-    # Live preview
-    sample_parts = {"Metal": "14K White Gold", "Thickness": "4.5", "Carat weight": "1"}
-    tokens = ["SR001"]
+    # Live preview using first real value from file if available
+    def _sample(col: str) -> str:
+        return (values.get(col) or [""])[0]
+
+    first_master = "SR001"
+    tokens = [first_master]
     for col in order:
-        v = sample_parts.get(col, "")
-        if not v: continue
+        v = _sample(col)
+        if not v:
+            continue
         code = (abbr.get(col) or {}).get(v)
         tokens.append(code if code else re.sub(r"[^A-Za-z0-9]", "", v).upper()[:maxlen])
-    preview = joiner.join(dict.fromkeys(t for t in tokens if t))
-    st.info(f"Preview — SR001 · 14K White Gold · 4.5mm · 1ct:  **{preview}**")
+    preview_val = joiner.join(dict.fromkeys(t for t in tokens if t))
+    st.info(f"Preview (first values from file):  **{preview_val}**")
 
-    return {"enabled": True, "joiner": joiner, "fallback_max_len": maxlen, "order": order, "abbr": abbr}
+    return {"enabled": True, "joiner": joiner, "fallback_max_len": maxlen,
+            "order": order, "abbr": abbr}
 
 
-def _render_image_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
-    ir = rules.get("image_rules", {}) or {}
-    st.markdown("##### Image URL generation")
+def _render_image_editor(rules: Dict[str, Any],
+                         avail_cols: List[str], values: Dict[str, List[str]]) -> Dict[str, Any]:
+    ir      = rules.get("image_rules", {}) or {}
     enabled = st.toggle("Enable image URL generation", value=bool(ir.get("enabled", False)))
 
-    c1, c2 = st.columns([3, 1])
-    base_url = c1.text_input("Base URL", value=ir.get("base_url", ""), placeholder="https://cdn.example.com/images/")
+    c1, c2  = st.columns([3, 1])
+    base_url = c1.text_input("Base URL", value=ir.get("base_url", ""),
+                              placeholder="https://cdn.example.com/images/")
     ext      = c2.text_input("Extension", value=ir.get("suffix", ".jpg"), max_chars=10)
 
-    c3, c4 = st.columns([1, 3])
-    joiner    = c3.text_input("Joiner", value=ir.get("joiner", "_"), max_chars=5)
-    img_count = c4.number_input("Number of image columns", value=len(ir.get("variants") or []) or 4, min_value=1, max_value=10)
+    c3, c4   = st.columns([1, 3])
+    joiner   = c3.text_input("Joiner", value=ir.get("joiner", "_"), max_chars=5)
+    img_count = c4.number_input("Number of image columns",
+                                value=len(ir.get("variants") or []) or 4, min_value=1, max_value=10)
 
     st.markdown("**Filename parts** — columns included in filename (in order)")
-    order = _order_editor("img", ir.get("order") or ["Master stock", "Metal"])
+    order = _order_editor("img", ir.get("order") or ["Master stock"] + avail_cols[:1],
+                          avail_cols, extra=["Master stock"])
 
     st.markdown("**Abbreviations** — shorten values in the filename")
-    st.caption("Column · Full value · Short code")
-    abbr = _abbr_editor("img", ir.get("abbr", {}))
+    abbr = _abbr_editor("img", ir.get("abbr", {}), avail_cols, values)
 
     # Live preview
-    col_map = {"Master stock": "SR001", "Metal": "14K White Gold"}
+    col_map = {"Master stock": "SR001"}
+    for base, vals in values.items():
+        if vals:
+            col_map[base] = vals[0]
     tokens = []
     for col in order:
         v = col_map.get(col, "")
-        if not v: continue
+        if not v:
+            continue
         code = (abbr.get(col) or {}).get(v)
-        tokens.append(code if code else re.sub(r"[^A-Za-z0-9]","",v).upper())
+        tokens.append(code if code else re.sub(r"[^A-Za-z0-9]", "", v).upper())
     fn_base = joiner.join(t for t in tokens if t)
     if base_url and fn_base:
         st.info(f"Preview — Image URL 1:  **{base_url}{fn_base}_1{ext}**")
     elif not base_url:
         st.warning("Set a base URL to see the preview.")
 
-    variants = [{"column": f"Image URL {i+1}", "path_suffix": f"_{i+1}"} for i in range(int(img_count))]
+    variants = [{"column": f"Image URL {i+1}", "path_suffix": f"_{i+1}"}
+                for i in range(int(img_count))]
     return {
         "enabled": enabled, "base_url": base_url, "suffix": ext,
         "joiner": joiner, "order": order, "abbr": abbr,
@@ -1338,32 +1471,35 @@ def _render_image_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _render_price_editor(rules: Dict[str, Any]) -> Dict[str, Any]:
+def _render_price_editor(rules: Dict[str, Any],
+                         avail_cols: List[str], values: Dict[str, List[str]]) -> Dict[str, Any]:
     pr = rules.get("price_rules", {}) or {}
-    st.markdown("##### Pricing adjustments")
     c1, c2 = st.columns(2)
-    default_price = c1.number_input("Default base price", value=float(pr.get("default_base_price", 0)), min_value=0.0, step=0.01)
-    currency      = c2.selectbox("Currency", ["USD", "EUR", "GBP", "INR", "AED"],
-                                  index=["USD","EUR","GBP","INR","AED"].index(pr.get("currency","USD"))
-                                  if pr.get("currency","USD") in ["USD","EUR","GBP","INR","AED"] else 0)
+    default_price = c1.number_input("Default base price",
+                                    value=float(pr.get("default_base_price", 0)),
+                                    min_value=0.0, step=0.01)
+    currencies    = ["USD", "EUR", "GBP", "INR", "AED"]
+    cur_val       = pr.get("currency", "USD")
+    currency      = c2.selectbox("Currency", currencies,
+                                 index=currencies.index(cur_val) if cur_val in currencies else 0)
 
     st.markdown("**Adjustments** — add or subtract per variant value")
-    adjustments = _price_adj_editor(pr.get("adjustments", {}))
+    adjustments = _price_adj_editor(pr.get("adjustments", {}), avail_cols, values)
 
-    # Live preview
-    sample = {"Metal": "14K White Gold"}
+    # Live preview using first values from file
     total = default_price
     lines = [f"Base: {currency} {default_price:.2f}"]
     for col, vals in adjustments.items():
-        sv = sample.get(col)
-        if sv and sv in vals:
-            amt = vals[sv]
+        first_val = (values.get(col) or [""])[0]
+        if first_val and first_val in vals:
+            amt = vals[first_val]
             total += amt
             sign_str = "+" if amt >= 0 else ""
-            lines.append(f'{col} = "{sv}": {sign_str}{currency} {amt:.2f}')
+            lines.append(f'{col} = "{first_val}": {sign_str}{currency} {amt:.2f}')
     st.info("  ·  ".join(lines) + f"  →  **{currency} {total:.2f}**")
 
-    return {"currency": currency, "default_base_price": default_price, "adjustments": adjustments}
+    return {"currency": currency, "default_base_price": default_price,
+            "adjustments": adjustments}
 
 
 # ==========================================================
@@ -1408,18 +1544,30 @@ def run_streamlit_app():
     st.markdown("Upload a CSV with `Master stock` and any `Available …` variant columns.")
     up = st.file_uploader("Upload CSV", type=["csv", "txt"])
 
-    # ── Main: rules configuration tabs ───────────────────────────────────
-    st.subheader("① Configure rules")
-    tab_sku, tab_img, tab_price = st.tabs(["SKU shortening", "Image URLs", "Pricing"])
+    # Parse file early so editors can use real columns + values as dropdowns.
+    # Falls back to empty lists when no file is uploaded yet.
+    if up is not None:
+        _raw_for_meta = up.read().decode("utf-8", errors="ignore")
+        up.seek(0)   # reset so the expansion step can read it again
+        _meta = extract_file_meta(_raw_for_meta)
+    else:
+        _meta = {"avail_cols": [], "all_cols": [], "values": {}}
 
-    with tab_sku:
-        new_sku_rules = _render_sku_editor(st.session_state["rules"])
+    avail_cols: List[str] = _meta["avail_cols"]
+    file_values: Dict[str, List[str]] = _meta["values"]
 
-    with tab_img:
-        new_img_rules = _render_image_editor(st.session_state["rules"])
+    # ── Main: rules configuration (collapsible) ───────────────────────────
+    with st.expander("① Configure rules", expanded=(up is None)):
+        tab_sku, tab_img, tab_price = st.tabs(["SKU shortening", "Image URLs", "Pricing"])
 
-    with tab_price:
-        new_price_rules = _render_price_editor(st.session_state["rules"])
+        with tab_sku:
+            new_sku_rules = _render_sku_editor(st.session_state["rules"], avail_cols, file_values)
+
+        with tab_img:
+            new_img_rules = _render_image_editor(st.session_state["rules"], avail_cols, file_values)
+
+        with tab_price:
+            new_price_rules = _render_price_editor(st.session_state["rules"], avail_cols, file_values)
 
     # Merge edited rules back
     merged_rules = dict(st.session_state["rules"])
